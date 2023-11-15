@@ -13,7 +13,7 @@ def descriptions():
 
 def version():
     version = 'unknown'
-    with open('octodns_cloudflare/__init__.py') as fh:
+    with open('octodns_bluecat/__init__.py') as fh:
         for line in fh:
             if line.startswith('__VERSION__'):
                 version = line.split("'")[1]

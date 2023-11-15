@@ -103,6 +103,7 @@ class BlueCatProvider(BaseProvider):
             if 'BAMAuthToken' in rv.json():
                 token = re.findall('BAMAuthToken: (.+) <-', rv.json())
                 self.token = token
+                sess.headers.update({'Authorization': f'BAMAuthToken: {token}'})
             else:
                 raise BlueCatError('Could not generate token.')
         else:
@@ -173,6 +174,7 @@ class BlueCatProvider(BaseProvider):
 
     @property
     def zones(self):
+        # TODO: Add Bluecat zone to list zones.
         if self._zones is None:
             page = 1
             zones = []
@@ -187,8 +189,11 @@ class BlueCatProvider(BaseProvider):
                     page += 1
                 else:
                     page = None
-
-            self._zones = IdnaDict({f'{z["name"]}.': z['id'] for z in zones})
+            # List of zones:
+            # [{'id': '', 'name': ''}] -> {'name': 'id'}
+            self._zones = IdnaDict(
+                {f'{z["name"]}.': z['id'] for z in zones}
+            )
 
         return self._zones
 
@@ -393,6 +398,7 @@ class BlueCatProvider(BaseProvider):
         }
 
     def zone_records(self, zone):
+        # TODO: Add Bluecat zone to list zones.
         if zone.name not in self._zone_records:
             zone_id = self.zones.get(zone.name, False)
             if not zone_id:
@@ -442,7 +448,7 @@ class BlueCatProvider(BaseProvider):
         record = Record.new(zone, name, data, source=self, lenient=lenient)
 
         if _type in _PROXIABLE_RECORD_TYPES:
-            record._octodns['cloudflare'] = {
+            record._octodns['bluecat'] = {
                 'proxied': records[0].get('proxied', False)
             }
 
@@ -691,7 +697,7 @@ class BlueCatProvider(BaseProvider):
             }
 
     def _record_is_proxied(self, record):
-        return not self.cdn and record._octodns.get('cloudflare', {}).get(
+        return not self.cdn and record._octodns.get('bluecat', {}).get(
             'proxied', False
         )
 
