@@ -1,7 +1,5 @@
-#
-#
-#
 import re
+import json
 from collections import defaultdict
 from copy import deepcopy
 from logging import getLogger
@@ -38,28 +36,22 @@ class BlueCatRateLimitError(BlueCatError):
         BlueCatError.__init__(self, data)
 
 
-_PROXIABLE_RECORD_TYPES = {'A', 'AAAA', 'ALIAS', 'CNAME'}
-
+_PROXIABLE_RECORD_TYPES = {'A', 'AAAA', 'Alias', 'CNAME'}
 
 class BlueCatProvider(BaseProvider):
     SUPPORTS_GEO = False
     SUPPORTS_DYNAMIC = False
     SUPPORTS = set(
         (
-            'ALIAS',
             'A',
             'AAAA',
-            'CAA',
+            'A6',
+            'Host'
             'CNAME',
-            'LOC',
+            'HINFO',
             'MX',
             'NAPTR',
-            'NS',
-            'PTR',
-            'SSHFP',
             'SRV',
-            'SPF',
-            'TLSA',
             'TXT',
         )
     )
@@ -74,6 +66,10 @@ class BlueCatProvider(BaseProvider):
         username=None,
         password=None,
         token=None,
+        confname=None,
+        viewname=None,
+        conf_id=None,
+        view_id=None,
         cdn=False,
         pagerules=True,
         retry_count=4,
@@ -92,6 +88,7 @@ class BlueCatProvider(BaseProvider):
         super().__init__(id, *args, **kwargs)
 
         sess = Session()
+        self._sess = sess
         self.endpoint = endpoint
         if username and password:
             # Generate token
@@ -100,10 +97,11 @@ class BlueCatProvider(BaseProvider):
                 path='/login',
                 params={'username': username, 'password': password}
             )
-            if 'BAMAuthToken' in rv.json():
-                token = re.findall('BAMAuthToken: (.+) <-', rv.json())
+            if 'BAMAuthToken' in rv:
+                token = re.findall('BAMAuthToken: (.+) <-', rv)[0]
                 self.token = token
                 sess.headers.update({'Authorization': f'BAMAuthToken: {token}'})
+                sess.headers.update({'Content-Type': 'application/json'})
             else:
                 raise BlueCatError('Could not generate token.')
         else:
@@ -114,13 +112,30 @@ class BlueCatProvider(BaseProvider):
                 'User-Agent': f'octodns/{octodns_version} octodns-bluecat/{__VERSION__}'
             }
         )
+        self.log.debug('_init: token=%s header=%s', token, sess.headers)
+        rv = self._request(
+                'GET',
+                path='/getEntityByName',
+                params = {'parentId': 0, 'name': confname, 'type': 'Configuration'}
+        )
+        self.log.debug('_init: conf_entity: %s', rv)
+        conf_id = rv['id']
+        rv = self._request(
+                'GET',
+                path='/getEntityByName',
+                params = {'parentId': conf_id, 'name': viewname, 'type': 'View'}
+        )
+        self.log.debug('_init: view_entity: %s', rv)
+        view_id = rv['id']
+
+        self.conf_id = conf_id
+        self.view_id = view_id
         self.cdn = cdn
         self.pagerules = pagerules
         self.retry_count = retry_count
         self.retry_period = retry_period
         self.zones_per_page = zones_per_page
         self.records_per_page = records_per_page
-        self._sess = sess
 
         self._zones = None
         self._zone_records = {}
@@ -148,12 +163,12 @@ class BlueCatProvider(BaseProvider):
                 )
                 sleep(self.retry_period)
 
-    def _request(self, method, path, params=None, data=None):
+    def _request(self, method, path, params=None, data=None, stream=False):
         self.log.debug('_request: method=%s, path=%s', method, path)
 
-        url = f'https://{self.endpoint}/Services/REST/v1/{path}'
+        url = f'https://{self.endpoint}/Services/REST/v1{path}'
         resp = self._sess.request(
-            method, url, params=params, json=data, timeout=self.TIMEOUT
+            method, url, params=params, json=data, timeout=self.TIMEOUT, stream=stream
         )
         self.log.debug('_request:   status=%d', resp.status_code)
         if resp.status_code == 400:
@@ -165,7 +180,10 @@ class BlueCatProvider(BaseProvider):
             raise BlueCatAuthenticationError(resp.json())
 
         resp.raise_for_status()
-        return resp.json()
+        if path != '/exportEntities':
+            return resp.json()
+        else:
+            return resp
 
     def _change_keyer(self, change):
         key = change.__class__.__name__
@@ -176,26 +194,46 @@ class BlueCatProvider(BaseProvider):
     def zones(self):
         # TODO: Add Bluecat zone to list zones.
         if self._zones is None:
-            page = 1
-            zones = []
-            while page:
-                params = {'page': page, 'per_page': self.zones_per_page}
-                if self.account_id is not None:
-                    params['account.id'] = self.account_id
-                resp = self._try_request('GET', '/zones', params=params)
-                zones += resp['result']
-                info = resp['result_info']
-                if info['count'] > 0 and info['count'] == info['per_page']:
-                    page += 1
-                else:
-                    page = None
+            zones = self._export_leaf_zone_entities()
             # List of zones:
             # [{'id': '', 'name': ''}] -> {'name': 'id'}
             self._zones = IdnaDict(
-                {f'{z["name"]}.': z['id'] for z in zones}
+                {f'{z["properties"]["absoluteName"]}.': z['id'] for z in zones}
             )
-
         return self._zones
+
+    def _export_entities(self, types, startid):
+        ents = []
+        select = {
+                'selector': 'get_entitytree',
+                'types': types,
+                'startEntityId': startid
+        }
+        json_select = json.dumps(select)
+        params = {
+            'selectCriteria': json_select,
+            'start': 0,
+            'count': 3000
+        }
+        self.log.debug('_export_entities: types=%s params=%s', types, params)
+        resp = self._try_request('GET', '/exportEntities', params=params, stream=True)
+        for line in resp.iter_lines():
+            if line:
+                decoded_line = line.decode('utf-8')
+                ents.append(json.loads(decoded_line))
+        return ents
+
+    def _export_zone_entities(self):
+        zones = self._export_entities('Zone', self.view_id)
+        return zones
+
+    def _export_leaf_zone_entities(self):
+        ents = []
+        zones = self._export_zone_entities()
+        for zone in zones:
+            if re.match('[0-9][0-9][0-9]', zone['name']):
+                ents.append(zone)
+        return ents
 
     def _ttl_data(self, ttl):
         return 300 if ttl == 1 else ttl
@@ -212,22 +250,22 @@ class BlueCatProvider(BaseProvider):
             'value': f'{records[0]["name"]}.cdn.cloudflare.net.',
         }
 
-    def _data_for_multiple(self, _type, records):
+    def _data_for_generic(self, _type, records):
         return {
             'ttl': self._ttl_data(records[0]['ttl']),
             'type': _type,
-            'values': [r['content'] for r in records],
+            'values': [r['properties']['rdata'] for r in records],
         }
 
-    _data_for_A = _data_for_multiple
-    _data_for_AAAA = _data_for_multiple
-    _data_for_SPF = _data_for_multiple
+    _data_for_A = _data_for_generic
+    _data_for_AAAA = _data_for_generic
+    _data_for_A6 = _data_for_generic
 
     def _data_for_TXT(self, _type, records):
         return {
             'ttl': self._ttl_data(records[0]['ttl']),
             'type': _type,
-            'values': [r['content'].replace(';', '\\;') for r in records],
+            'values': [r['properties']['txt'].replace(';', '\\;') for r in records],
         }
 
     def _data_for_CAA(self, _type, records):
@@ -249,51 +287,26 @@ class BlueCatProvider(BaseProvider):
             'value': f'{only["content"]}.' if only['content'] != '.' else '.',
         }
 
-    _data_for_ALIAS = _data_for_CNAME
-    _data_for_PTR = _data_for_CNAME
+    _data_for_Alias = _data_for_CNAME
 
-    def _data_for_LOC(self, _type, records):
+    def _data_for_HINFO(self, _type, records):
         values = []
-        for record in records:
-            r = record['data']
-            values.append(
-                {
-                    'lat_degrees': int(r['lat_degrees']),
-                    'lat_minutes': int(r['lat_minutes']),
-                    'lat_seconds': float(r['lat_seconds']),
-                    'lat_direction': r['lat_direction'],
-                    'long_degrees': int(r['long_degrees']),
-                    'long_minutes': int(r['long_minutes']),
-                    'long_seconds': float(r['long_seconds']),
-                    'long_direction': r['long_direction'],
-                    'altitude': float(r['altitude']),
-                    'size': float(r['size']),
-                    'precision_horz': float(r['precision_horz']),
-                    'precision_vert': float(r['precision_vert']),
-                }
-            )
-        return {
-            'ttl': self._ttl_data(records[0]['ttl']),
-            'type': _type,
-            'values': values,
-        }
+        for r in records:
+            props = r['properties']
+            values.append({ 'os': props['os'], 'cpu': props['cpu']})
+        return { 'ttl': 300, 'type': _type, 'values': values }
 
     def _data_for_MX(self, _type, records):
         values = []
         for r in records:
+            props = r['properties']
             values.append(
                 {
-                    'preference': r['priority'],
-                    'exchange': f'{r["content"]}.'
-                    if r['content'] != '.'
-                    else '.',
+                    'preference': props['priority'],
+                    'exchange': f'{props["linkedRecordName"]}.' 
                 }
             )
-        return {
-            'ttl': self._ttl_data(records[0]['ttl']),
-            'type': _type,
-            'values': values,
-        }
+        return { 'ttl': 300, 'type': _type, 'values': values }
 
     def _data_for_NAPTR(self, _type, records):
         values = []
@@ -313,13 +326,6 @@ class BlueCatProvider(BaseProvider):
             'ttl': self._ttl_data(records[0]['ttl']),
             'type': _type,
             'values': values,
-        }
-
-    def _data_for_NS(self, _type, records):
-        return {
-            'ttl': self._ttl_data(records[0]['ttl']),
-            'type': _type,
-            'values': [f'{r["content"]}.' for r in records],
         }
 
     def _data_for_SRV(self, _type, records):
@@ -342,96 +348,72 @@ class BlueCatProvider(BaseProvider):
             'values': values,
         }
 
-    def _data_for_TLSA(self, _type, records):
-        values = []
-        for r in records:
-            data = r['data']
-            values.append(
-                {
-                    'certificate_usage': data['usage'],
-                    'selector': data['selector'],
-                    'matching_type': data['matching_type'],
-                    'certificate_association_data': data['certificate'],
-                }
-            )
-        return {
-            'ttl': self._ttl_data(records[0]['ttl']),
-            'type': _type,
-            'values': values,
+        """
+        Format of RRs. from getEntities
+        params = {'parentId': id, type='GenericRecord', start=0, count=100}
+        Generic Records:
+        [
+         { 'id': 2866216, 'name': 'Q277_test', 'type': 'GenericRecord',
+         'properties': 'comments=A solo A Resource Record|absoluteName=Q277_test.277.privatelink.ods.opinsights.azure.com|type=A|rdata=10.141.45.196|'},
+         { 'id': 2866849, 'name': 'n277_test', 'type': 'GenericRecord',
+         'properties': 'comments=A solo A Resource Record|absoluteName=n277_test.277.privatelink.ods.opinsights.azure.com|type=A|rdata=10.141.118.199|'}
+        ]
+        All RRs using ExportEntities
+        {'name': 'generic', 'id': 2915663, 'type': 'GenericRecord', 'properties': {'comments': 'Generic generic record', 'absoluteName': 'generic.bozo.test', 'rdata': '128.100.102.10', 'type': 'A', 'parentId': 2915662, 'parentType': 'Zone'}}
+        {'name': 'text', 'id': 2915664, 'type': 'TXTRecord', 'properties': {'txt': 'Test Text Record', 'comments': 'Generic TXT Record', 'absoluteName': 'text.bozo.test', 'parentId': 2915662, 'parentType': 'Zone'}}
+        {'name': 'moretext', 'id': 2915665, 'type': 'TXTRecord', 'properties': {'txt': 'Two Txt Records', 'comments': 'YATR OK', 'absoluteName': 'moretext.bozo.test', 'parentId': 2915662, 'parentType': 'Zone'}}
+        {'name': 'mx', 'id': 2915667, 'type': 'GenericRecord', 'properties': {'comments': 'SMTP host', 'absoluteName': 'mx.bozo.test', 'rdata': '128.100.103.17', 'type': 'A', 'parentId': 2915662, 'parentType': 'Zone'}}
+        {'name': 'mail', 'id': 2915671, 'type': 'MXRecord', 'properties': {'comments': 'Generic MX record', 'linkedRecordName': 'mx.bozo.test', 'absoluteName': 'mail.bozo.test', 'priority': 10, 'parentId': 2915662, 'parentType': 'Zone'}}
+        {'name': 'mx', 'id': 2915672, 'type': 'HINFORecord', 'properties': {'comments': 'Generic HINFO record', 'os': 'OpenBSD', 'absoluteName': 'mx.bozo.test', 'cpu': 'x86', 'parentId': 2915662, 'parentType': 'Zone'}}
+        {'name': 'mailer', 'id': 2915674, 'type': 'AliasRecord', 'properties': {'comments': 'Generic CNAME', 'linkedRecordName': 'mx.bozo.test', 'absoluteName': 'mailer.bozo.test', 'parentId': 2915662, 'parentType': 'Zone'}}
+        {'name': 'host', 'id': 2915676, 'type': 'HostRecord', 'properties': {'addresses': '10.10.10.10', 'comments': 'Generic Host record', 'absoluteName': 'host.bozo.test', 'reverseRecord': True, 'addressIds': '2520866', 'parentId': 2915662, 'parentType': 'Zone'}}
+        {'name': 'toast', 'id': 2915677, 'type': 'AliasRecord', 'properties': {'comments': 'Generic Host record', 'linkedRecordName': 'host.bozo.test', 'absoluteName': 'toast.bozo.test', 'parentId': 2915662, 'parentType': 'Zone'}}
+        {'name': 'naptr', 'id': 2915679, 'type': 'NAPTRRecord', 'properties': {'regexp': '!^.*$!sip:customer-service@bozo.test!', 'comments': 'Test NAPTR record', 'absoluteName': 'naptr.bozo.test', 'service': 'SIP', 'preference': 10, 'flags': 'S', 'replacement': 'mx.bozo.test', 'parentId': 2915662, 'parentType': 'Zone', 'order': 100}}
+        {'name': 'sipper', 'id': 2915682, 'type': 'SRVRecord', 'properties': {'comments': 'Generic SRV record', 'linkedRecordName': 'host.bozo.test', 'port': 5060, 'absoluteName': 'sipper.bozo.test', 'weight': 20, 'priority': 10, 'parentId': 2915662, 'parentType': 'Zone'}}
+        {'name': 'q278_test', 'id': 2915683, 'type': 'GenericRecord', 'properties': {'comments': 'Aure like record', 'absoluteName': 'q278_test.bozo.test', 'rdata': '10.141.1.2', 'type': 'A', 'parentId': 2915662, 'parentType': 'Zone'}}
+        Format of RRs from CloudFlare:
+        --url https://api.cloudflare.com/client/v4/zones/zone_identifier/dns_records
+        Response:
+        {
+          "errors": [],
+          "messages": [],
+          "result": [
+            {
+              "content": "198.51.100.4",
+              "name": "example.com",
+              "proxied": false,
+              "type": "A",
+              "comment": "Domain verification record",
+              "created_on": "2014-01-01T05:20:00.12345Z",
+              "id": "023e105f4ecef8ad9ca31a8372d0c353",
+              "locked": false,
+              "meta": { "auto_added": true, "source": "primary" },
+              "modified_on": "2014-01-01T05:20:00.12345Z",
+              "proxiable": true,
+              "tags": [ "owner:dns-team" ],
+              "ttl": 3600,
+              "zone_id": "023e105f4ecef8ad9ca31a8372d0c353",
+              "zone_name": "example.com"
+            }
+          ],
+          "success": true,
+          "result_info": { "count": 1, "page": 1, "per_page": 20, "total_count": 2000 }
         }
 
-    def _data_for_URLFWD(self, _type, records):
-        values = []
-        for r in records:
-            values.append(
-                {
-                    'path': r['path'],
-                    'target': r['url'],
-                    'code': r['status_code'],
-                    'masking': 2,
-                    'query': 0,
-                }
-            )
-        return {
-            'type': _type,
-            'ttl': 300,  # ttl does not exist for this type, forcing a setting
-            'values': values,
-        }
-
-    def _data_for_SSHFP(self, _type, records):
-        values = []
-        for record in records:
-            algorithm, fingerprint_type, fingerprint = record['content'].split(
-                ' ', 2
-            )
-            values.append(
-                {
-                    'algorithm': int(algorithm),
-                    'fingerprint_type': int(fingerprint_type),
-                    'fingerprint': fingerprint,
-                }
-            )
-        return {
-            'type': _type,
-            'values': values,
-            'ttl': self._ttl_data(records[0]['ttl']),
-        }
+        """
 
     def zone_records(self, zone):
-        # TODO: Add Bluecat zone to list zones.
+        self.log.debug(f'zone_records: zone: {zone.name}')
         if zone.name not in self._zone_records:
             zone_id = self.zones.get(zone.name, False)
             if not zone_id:
                 return []
-
-            records = []
-            path = f'/zones/{zone_id}/dns_records'
-            page = 1
-            while page:
-                resp = self._try_request(
-                    'GET',
-                    path,
-                    params={'page': page, 'per_page': self.records_per_page},
-                )
-                records += resp['result']
-                info = resp['result_info']
-                if info['count'] > 0 and info['count'] == info['per_page']:
-                    page += 1
-                else:
-                    page = None
-            if self.pagerules:
-                path = f'/zones/{zone_id}/pagerules'
-                resp = self._try_request(
-                    'GET', path, params={'status': 'active'}
-                )
-                for r in resp['result']:
-                    # assumption, base on API guide, will only contain 1 action
-                    if r['actions'][0]['id'] == 'forwarding_url':
-                        records += [r]
-
-            self._zone_records[zone.name] = records
-
-        return self._zone_records[zone.name]
+        records = []
+        types = 'HostRecord,AliasRecord,MXRecord,SRVRecord,TXTRecord,HINFORecord,NAPTRRecord,GenericRecord'
+        records = self._export_entities(types, zone_id)
+        self.log.debug('zone_records: zone_id:%s, types=%s, records=%s', zone_id, types, records)
+        self._zone_records[zone.name] = records
+        return records
 
     def _record_for(self, zone, name, _type, records, lenient):
         # rewrite Cloudflare proxied records
@@ -472,32 +454,14 @@ class BlueCatProvider(BaseProvider):
             exists = True
             values = defaultdict(lambda: defaultdict(list))
             for record in records:
-                if 'targets' in record:
-                    # We shouldn't get in here when pagerules are disabled as
-                    # we won't make the call to fetch the details/them
-                    #
-                    # assumption, targets will always contain 1 target
-                    # API documentation only indicates 'url' as the only target
-                    # if record['targets'][0]['target'] == 'url':
-                    uri = record['targets'][0]['constraint']['value']
-                    uri = '//' + uri if not uri.startswith('http') else uri
-                    parsed_uri = urlsplit(uri)
-                    name = zone.hostname_from_fqdn(parsed_uri.netloc)
-                    path = parsed_uri.path
-                    _type = 'URLFWD'
-                    # assumption, actions will always contain 1 action
-                    _values = record['actions'][0]['value']
-                    _values['path'] = path
-                    # no ttl set by pagerule, creating one
-                    _values['ttl'] = 300
-                    values[name][_type].append(_values)
-                # the dns_records branch
-                # elif 'name' in record:
-                else:
-                    name = zone.hostname_from_fqdn(record['name'])
-                    _type = record['type']
-                    if _type in self.SUPPORTS:
-                        values[name][record['type']].append(record)
+                name = record['name']
+                _type = record['type'][:-6]
+                if _type == 'Generic':
+                    _type = record['properties']['type']
+                if _type == 'Alias':
+                    _type = 'CNAME'
+                if _type in self.SUPPORTS:
+                    values[name][_type].append(record)
 
             for name, types in values.items():
                 for _type, records in types.items():
