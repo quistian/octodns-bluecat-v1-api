@@ -16,7 +16,6 @@ from octodns.record import Create, Record, Update
 
 __VERSION__ = '0.0.1'
 
-
 class BlueCatError(ProviderException):
     def __init__(self, data):
         try:
@@ -41,14 +40,14 @@ _PROXIABLE_RECORD_TYPES = {'A', 'AAAA', 'Alias', 'CNAME'}
 class BlueCatProvider(BaseProvider):
     SUPPORTS_GEO = False
     SUPPORTS_DYNAMIC = False
+    SUPPORTS_ROOT_NS = False
     SUPPORTS = set(
         (
             'A',
             'AAAA',
             'A6',
-            'Host'
+            'APTR'
             'CNAME',
-            'HINFO',
             'MX',
             'NAPTR',
             'SRV',
@@ -70,12 +69,8 @@ class BlueCatProvider(BaseProvider):
         viewname=None,
         conf_id=None,
         view_id=None,
-        cdn=False,
-        pagerules=True,
         retry_count=4,
         retry_period=300,
-        zones_per_page=50,
-        records_per_page=100,
         *args,
         **kwargs,
     ):
@@ -94,35 +89,32 @@ class BlueCatProvider(BaseProvider):
             # Generate token
             rv = self._request(
                 'GET',
-                path='/login',
+                path='login',
                 params={'username': username, 'password': password}
             )
             if 'BAMAuthToken' in rv:
                 token = re.findall('BAMAuthToken: (.+) <-', rv)[0]
                 self.token = token
-                sess.headers.update({'Authorization': f'BAMAuthToken: {token}'})
-                sess.headers.update({'Content-Type': 'application/json'})
             else:
                 raise BlueCatError('Could not generate token.')
         else:
             self.token = token
-            sess.headers.update({'Authorization': f'BAMAuthToken: {token}'})
-        sess.headers.update(
-            {
-                'User-Agent': f'octodns/{octodns_version} octodns-bluecat/{__VERSION__}'
-            }
-        )
+        sess.headers.update({'Authorization': f'BAMAuthToken: {token}'})
+        sess.headers.update({'Content-Type': 'application/json'})
+        sess.headers.update({'User-Agent': f'octodns/{octodns_version} octodns-bluecat/{__VERSION__}'})
         self.log.debug('_init: token=%s header=%s', token, sess.headers)
+
+        # get the BC Configuration and View Ids
         rv = self._request(
                 'GET',
-                path='/getEntityByName',
+                path='getEntityByName',
                 params = {'parentId': 0, 'name': confname, 'type': 'Configuration'}
         )
         self.log.debug('_init: conf_entity: %s', rv)
         conf_id = rv['id']
         rv = self._request(
                 'GET',
-                path='/getEntityByName',
+                path='getEntityByName',
                 params = {'parentId': conf_id, 'name': viewname, 'type': 'View'}
         )
         self.log.debug('_init: view_entity: %s', rv)
@@ -130,21 +122,11 @@ class BlueCatProvider(BaseProvider):
 
         self.conf_id = conf_id
         self.view_id = view_id
-        self.cdn = cdn
-        self.pagerules = pagerules
         self.retry_count = retry_count
         self.retry_period = retry_period
-        self.zones_per_page = zones_per_page
-        self.records_per_page = records_per_page
 
         self._zones = None
         self._zone_records = {}
-        if self.pagerules:
-            # copy the class static/ever present list of supported types into
-            # an instance property so that when we modify it we won't change
-            # the shared version
-            self.SUPPORTS = set(self.SUPPORTS)
-            self.SUPPORTS.add('URLFWD')
 
     def _try_request(self, *args, **kwargs):
         tries = self.retry_count
@@ -166,7 +148,7 @@ class BlueCatProvider(BaseProvider):
     def _request(self, method, path, params=None, data=None, stream=False):
         self.log.debug('_request: method=%s, path=%s', method, path)
 
-        url = f'https://{self.endpoint}/Services/REST/v1{path}'
+        url = f'https://{self.endpoint}/Services/REST/v1/{path}'
         resp = self._sess.request(
             method, url, params=params, json=data, timeout=self.TIMEOUT, stream=stream
         )
@@ -180,7 +162,7 @@ class BlueCatProvider(BaseProvider):
             raise BlueCatAuthenticationError(resp.json())
 
         resp.raise_for_status()
-        if path != '/exportEntities':
+        if path != 'exportEntities':
             return resp.json()
         else:
             return resp
@@ -192,7 +174,6 @@ class BlueCatProvider(BaseProvider):
 
     @property
     def zones(self):
-        # TODO: Add Bluecat zone to list zones.
         if self._zones is None:
             zones = self._export_leaf_zone_entities()
             # List of zones:
@@ -216,7 +197,7 @@ class BlueCatProvider(BaseProvider):
             'count': 3000
         }
         self.log.debug('_export_entities: types=%s params=%s', types, params)
-        resp = self._try_request('GET', '/exportEntities', params=params, stream=True)
+        resp = self._try_request('GET', 'exportEntities', params=params, stream=True)
         for line in resp.iter_lines():
             if line:
                 decoded_line = line.decode('utf-8')
@@ -235,24 +216,15 @@ class BlueCatProvider(BaseProvider):
                 ents.append(zone)
         return ents
 
-    def _ttl_data(self, ttl):
-        return 300 if ttl == 1 else ttl
-
-    def _data_for_cdn(self, name, _type, records):
-        self.log.info('CDN rewrite for %s', records[0]['name'])
-        _type = "CNAME"
-        if name == "":
-            _type = "ALIAS"
-
-        return {
-            'ttl': self._ttl_data(records[0]['ttl']),
-            'type': _type,
-            'value': f'{records[0]["name"]}.cdn.cloudflare.net.',
-        }
+    def _ttl_data(self, props):
+        if 'ttl' in props:
+            return props['ttl']
+        else:
+            return 3600
 
     def _data_for_generic(self, _type, records):
         return {
-            'ttl': self._ttl_data(records[0]['ttl']),
+            'ttl': self._ttl_data(records[0]['properties']),
             'type': _type,
             'values': [r['properties']['rdata'] for r in records],
         }
@@ -260,44 +232,48 @@ class BlueCatProvider(BaseProvider):
     _data_for_A = _data_for_generic
     _data_for_AAAA = _data_for_generic
     _data_for_A6 = _data_for_generic
+    _data_for_SPF = _data_for_generic
+
+    def _data_for_HOST(self, _type, records):
+        return {
+            'ttl': self._ttl_data(records[0]['properties']),
+            'type': 'A',
+            'values': [r['properties']['addresses'] for r in records],
+        }
 
     def _data_for_TXT(self, _type, records):
         return {
-            'ttl': self._ttl_data(records[0]['ttl']),
+            'ttl': self._ttl_data(records[0]['properties']),
             'type': _type,
             'values': [r['properties']['txt'].replace(';', '\\;') for r in records],
         }
 
-    def _data_for_CAA(self, _type, records):
-        values = []
-        for r in records:
-            data = r['data']
-            values.append(data)
-        return {
-            'ttl': self._ttl_data(records[0]['ttl']),
-            'type': _type,
-            'values': values,
-        }
-
     def _data_for_CNAME(self, _type, records):
         only = records[0]
+        props = only['properties']
         return {
-            'ttl': self._ttl_data(only['ttl']),
+            'ttl': self._ttl_data(props),
             'type': _type,
-            'value': f'{only["content"]}.' if only['content'] != '.' else '.',
+            'value': f'{props["linkedRecordName"]}.',
         }
 
     _data_for_Alias = _data_for_CNAME
 
     def _data_for_HINFO(self, _type, records):
         values = []
+        only = records[0]
         for r in records:
             props = r['properties']
             values.append({ 'os': props['os'], 'cpu': props['cpu']})
-        return { 'ttl': 300, 'type': _type, 'values': values }
+        return {
+            'ttl': self._ttl_data(only['properties']),
+            'type': _type,
+            'values': values
+        }
 
     def _data_for_MX(self, _type, records):
         values = []
+        only = records[0]
         for r in records:
             props = r['properties']
             values.append(
@@ -306,24 +282,28 @@ class BlueCatProvider(BaseProvider):
                     'exchange': f'{props["linkedRecordName"]}.' 
                 }
             )
-        return { 'ttl': 300, 'type': _type, 'values': values }
+        return {
+            'ttl': self._ttl_data(only['properties']),
+            'type': _type,
+            'values': values
+        }
 
     def _data_for_NAPTR(self, _type, records):
         values = []
         for r in records:
-            data = r['data']
+            data = r['properties']
             values.append(
                 {
                     'flags': data['flags'],
-                    'order': data['order'],
                     'preference': data['preference'],
-                    'regexp': data['regex'],
+                    'regexp': data['regexp'],
                     'replacement': data['replacement'],
                     'service': data['service'],
+                    'order': data['order'],
                 }
             )
         return {
-            'ttl': self._ttl_data(records[0]['ttl']),
+            'ttl': self._ttl_data(records[0]['properties']),
             'type': _type,
             'values': values,
         }
@@ -331,20 +311,18 @@ class BlueCatProvider(BaseProvider):
     def _data_for_SRV(self, _type, records):
         values = []
         for r in records:
-            target = (
-                f'{r["data"]["target"]}.' if r['data']['target'] != "." else "."
-            )
+            props = r['properties']
             values.append(
                 {
-                    'priority': r['data']['priority'],
-                    'weight': r['data']['weight'],
-                    'port': r['data']['port'],
-                    'target': target,
+                    'priority': props['priority'],
+                    'weight': props['weight'],
+                    'port': props['port'],
+                    'target': f'{props["linkedRecordName"]}.',
                 }
             )
         return {
             'type': _type,
-            'ttl': self._ttl_data(records[0]['ttl']),
+            'ttl': self._ttl_data(records[0]['properties']),
             'values': values,
         }
 
@@ -359,7 +337,10 @@ class BlueCatProvider(BaseProvider):
          'properties': 'comments=A solo A Resource Record|absoluteName=n277_test.277.privatelink.ods.opinsights.azure.com|type=A|rdata=10.141.118.199|'}
         ]
         All RRs using ExportEntities
-        {'name': 'generic', 'id': 2915663, 'type': 'GenericRecord', 'properties': {'comments': 'Generic generic record', 'absoluteName': 'generic.bozo.test', 'rdata': '128.100.102.10', 'type': 'A', 'parentId': 2915662, 'parentType': 'Zone'}}
+        {'name': 'generic', 'id': 2915663, 'type': 'GenericRecord', 'properties': {'comments': 'Generic generic record', 'absoluteName': 'generic.123.test', 'rdata': '128.100.102.10', 'type': 'A', 'ttl': 7200, 'parentId': 2915662, 'parentType': 'Zone'}}
+        {'name': 'q278_test', 'id': 2915683, 'type': 'GenericRecord', 'properties': {'comments': 'Aure like record', 'absoluteName': 'q278_test.bozo.test', 'rdata': '10.141.1.2', 'type': 'A', 'parentId': 2915662, 'parentType': 'Zone'}}
+        {'name': 'ptr', 'id': 2917713, 'type': 'GenericRecord', 'properties': {'comments': 'Adding a PTR record', 'absoluteName': 'ptr.123.test', 'rdata': '10.141.10.1', 'type': 'PTR', 'ttl': 900, 'parentId': 2915662, 'parentType': 'Zone'}}
+        {'name': 'spf', 'id': 2917715, 'type': 'GenericRecord', 'properties': {'comments': 'SPF record test', 'absoluteName': 'spf.123.test', 'rdata': 'Funky SPF data', 'type': 'SPF', 'ttl': 9999, 'parentId': 2915662, 'parentType': 'Zone'}}
         {'name': 'text', 'id': 2915664, 'type': 'TXTRecord', 'properties': {'txt': 'Test Text Record', 'comments': 'Generic TXT Record', 'absoluteName': 'text.bozo.test', 'parentId': 2915662, 'parentType': 'Zone'}}
         {'name': 'moretext', 'id': 2915665, 'type': 'TXTRecord', 'properties': {'txt': 'Two Txt Records', 'comments': 'YATR OK', 'absoluteName': 'moretext.bozo.test', 'parentId': 2915662, 'parentType': 'Zone'}}
         {'name': 'mx', 'id': 2915667, 'type': 'GenericRecord', 'properties': {'comments': 'SMTP host', 'absoluteName': 'mx.bozo.test', 'rdata': '128.100.103.17', 'type': 'A', 'parentId': 2915662, 'parentType': 'Zone'}}
@@ -370,7 +351,6 @@ class BlueCatProvider(BaseProvider):
         {'name': 'toast', 'id': 2915677, 'type': 'AliasRecord', 'properties': {'comments': 'Generic Host record', 'linkedRecordName': 'host.bozo.test', 'absoluteName': 'toast.bozo.test', 'parentId': 2915662, 'parentType': 'Zone'}}
         {'name': 'naptr', 'id': 2915679, 'type': 'NAPTRRecord', 'properties': {'regexp': '!^.*$!sip:customer-service@bozo.test!', 'comments': 'Test NAPTR record', 'absoluteName': 'naptr.bozo.test', 'service': 'SIP', 'preference': 10, 'flags': 'S', 'replacement': 'mx.bozo.test', 'parentId': 2915662, 'parentType': 'Zone', 'order': 100}}
         {'name': 'sipper', 'id': 2915682, 'type': 'SRVRecord', 'properties': {'comments': 'Generic SRV record', 'linkedRecordName': 'host.bozo.test', 'port': 5060, 'absoluteName': 'sipper.bozo.test', 'weight': 20, 'priority': 10, 'parentId': 2915662, 'parentType': 'Zone'}}
-        {'name': 'q278_test', 'id': 2915683, 'type': 'GenericRecord', 'properties': {'comments': 'Aure like record', 'absoluteName': 'q278_test.bozo.test', 'rdata': '10.141.1.2', 'type': 'A', 'parentId': 2915662, 'parentType': 'Zone'}}
         Format of RRs from CloudFlare:
         --url https://api.cloudflare.com/client/v4/zones/zone_identifier/dns_records
         Response:
@@ -416,24 +396,9 @@ class BlueCatProvider(BaseProvider):
         return records
 
     def _record_for(self, zone, name, _type, records, lenient):
-        # rewrite Cloudflare proxied records
-        if self.cdn and records[0]['proxied']:
-            data = self._data_for_cdn(name, _type, records)
-        else:
-            # Cloudflare supports ALIAS semantics with root CNAMEs
-            if _type == 'CNAME' and name == '':
-                _type = 'ALIAS'
-
-            data_for = getattr(self, f'_data_for_{_type}')
-            data = data_for(_type, records)
-
+        data_for = getattr(self, f'_data_for_{_type}')
+        data = data_for(_type, records)
         record = Record.new(zone, name, data, source=self, lenient=lenient)
-
-        if _type in _PROXIABLE_RECORD_TYPES:
-            record._octodns['bluecat'] = {
-                'proxied': records[0].get('proxied', False)
-            }
-
         return record
 
     def list_zones(self):
@@ -447,39 +412,23 @@ class BlueCatProvider(BaseProvider):
             lenient,
         )
 
-        exists = False
-        before = len(zone.records)
         records = self.zone_records(zone)
+        before = len(zone.records)
+        exists = False
+
         if records:
             exists = True
             values = defaultdict(lambda: defaultdict(list))
             for record in records:
+                _type = self._mod_type(record)
+                if _type not in self.SUPPORTS:
+                    continue
                 name = record['name']
-                _type = record['type'][:-6]
-                if _type == 'Generic':
-                    _type = record['properties']['type']
-                if _type == 'Alias':
-                    _type = 'CNAME'
-                if _type in self.SUPPORTS:
-                    values[name][_type].append(record)
+                values[name][_type].append(record)
 
             for name, types in values.items():
                 for _type, records in types.items():
-                    record = self._record_for(
-                        zone, name, _type, records, lenient
-                    )
-
-                    # only one rewrite is needed for names where the proxy is
-                    # enabled at multiple records with a different type but
-                    # the same name
-                    if (
-                        self.cdn
-                        and records[0]['proxied']
-                        and record in zone._records[name]
-                    ):
-                        self.log.info('CDN rewrite %s already in zone', name)
-                        continue
-
+                    record = self._record_for(zone, name, _type, records, lenient)
                     zone.add_record(record, lenient=lenient)
 
         self.log.info(
@@ -489,6 +438,17 @@ class BlueCatProvider(BaseProvider):
         )
         return exists
 
+    def _mod_type(self, rr):
+        rr_type = None
+        bc_type = rr['type'][:-6]
+        if bc_type == 'Generic':
+            rr_type = rr['properties']['type']
+        elif bc_type == 'Alias':
+            rr_type = 'CNAME'
+        elif bc_type == 'Host':
+            rr_type = 'APTR'
+        return rr_type
+
     def _include_change(self, change):
         if isinstance(change, Create) and change.new._type == 'SPF':
             msg = f'{self.id}: creating new SPF records not supported, use TXT instead'
@@ -496,30 +456,11 @@ class BlueCatProvider(BaseProvider):
 
         if isinstance(change, Update):
             new = change.new.data
-
-            # Cloudflare manages TTL of proxied records, so we should exclude
-            # TTL from the comparison (to prevent false-positives).
-            if self._record_is_proxied(change.existing):
-                existing = deepcopy(change.existing.data)
-                existing.update({'ttl': new['ttl']})
-            elif change.new._type == 'URLFWD':
-                existing = deepcopy(change.existing.data)
-                existing.update({'ttl': new['ttl']})
-            else:
-                existing = change.existing.data
+            existing = change.existing.data
 
             new['ttl'] = max(self.MIN_TTL, new['ttl'])
             if new == existing:
                 return False
-
-        # If this is a record to enable Cloudflare CDN don't update as
-        # we don't know the original values.
-        if change.record._type in (
-            'ALIAS',
-            'CNAME',
-        ) and change.record.value.endswith('.cdn.cloudflare.net.'):
-            return False
-
         return True
 
     def _contents_for_multiple(self, record):
@@ -530,16 +471,6 @@ class BlueCatProvider(BaseProvider):
     _contents_for_AAAA = _contents_for_multiple
     _contents_for_NS = _contents_for_multiple
     _contents_for_SPF = _contents_for_multiple
-
-    def _contents_for_CAA(self, record):
-        for value in record.values:
-            yield {
-                'data': {
-                    'flags': value.flags,
-                    'tag': value.tag,
-                    'value': value.value,
-                }
-            }
 
     def _contents_for_TXT(self, record):
         for value in record.values:
@@ -660,10 +591,6 @@ class BlueCatProvider(BaseProvider):
                 'status': 'active',
             }
 
-    def _record_is_proxied(self, record):
-        return not self.cdn and record._octodns.get('bluecat', {}).get(
-            'proxied', False
-        )
 
     def _gen_data(self, record):
         name = record.fqdn[:-1]
@@ -674,19 +601,10 @@ class BlueCatProvider(BaseProvider):
         if _type == 'ALIAS':
             _type = 'CNAME'
 
-        if _type == 'URLFWD':
-            contents_for = getattr(self, f'_contents_for_{_type}')
-            for content in contents_for(record):
-                yield content
-        else:
-            contents_for = getattr(self, f'_contents_for_{_type}')
-            for content in contents_for(record):
-                content.update({'name': name, 'type': _type, 'ttl': ttl})
-
-                if _type in _PROXIABLE_RECORD_TYPES:
-                    content.update({'proxied': self._record_is_proxied(record)})
-
-                yield content
+        contents_for = getattr(self, f'_contents_for_{_type}')
+        for content in contents_for(record):
+            content.update({'name': name, 'type': _type, 'ttl': ttl})
+            yield content
 
     def _gen_key(self, data):
         # Note that most CF record data has a `content` field the value of
@@ -776,11 +694,8 @@ class BlueCatProvider(BaseProvider):
 
     def _apply_Create(self, change):
         new = change.new
-        zone_id = self.zones[new.zone.name]
-        if new._type == 'URLFWD':
-            path = f'/zones/{zone_id}/pagerules'
-        else:
-            path = f'/zones/{zone_id}/dns_records'
+        zone_id = self.view_id
+        path = f'zones/{zone_id}/dns_records'
         for content in self._gen_data(new):
             self._try_request('POST', path, data=content)
 
@@ -876,10 +791,7 @@ class BlueCatProvider(BaseProvider):
         # otherwise required, just makes things deterministic
 
         # Creates
-        if _type == 'URLFWD':
-            path = f'/zones/{zone_id}/pagerules'
-        else:
-            path = f'/zones/{zone_id}/dns_records'
+        path = f'zones/{zone_id}/dns_records'
         for _, data in sorted(creates.items()):
             self.log.debug('_apply_Update: creating %s', data)
             self._try_request('POST', path, data=data)
@@ -889,10 +801,7 @@ class BlueCatProvider(BaseProvider):
             record_id = info['record_id']
             data = info['data']
             old_data = info['old_data']
-            if _type == 'URLFWD':
-                path = f'/zones/{zone_id}/pagerules/{record_id}'
-            else:
-                path = f'/zones/{zone_id}/dns_records/{record_id}'
+            path = f'zones/{zone_id}/dns_records/{record_id}'
             self.log.debug(
                 '_apply_Update: updating %s, %s -> %s',
                 record_id,
@@ -905,10 +814,7 @@ class BlueCatProvider(BaseProvider):
         for _, info in sorted(deletes.items()):
             record_id = info['record_id']
             old_data = info['data']
-            if _type == 'URLFWD':
-                path = f'/zones/{zone_id}/pagerules/{record_id}'
-            else:
-                path = f'/zones/{zone_id}/dns_records/{record_id}'
+            path = f'zones/{zone_id}/dns_records/{record_id}'
             self.log.debug(
                 '_apply_Update: removing %s, %s', record_id, old_data
             )
@@ -917,32 +823,22 @@ class BlueCatProvider(BaseProvider):
     def _apply_Delete(self, change):
         existing = change.existing
         existing_name = existing.fqdn[:-1]
-        # Make sure to map ALIAS to CNAME when looking for the target to delete
-        existing_type = 'CNAME' if existing._type == 'ALIAS' else existing._type
+        existing_type = existing._type
         for record in self.zone_records(existing.zone):
-            if 'targets' in record and self.pagerules:
-                uri = record['targets'][0]['constraint']['value']
-                uri = '//' + uri if not uri.startswith('http') else uri
-                parsed_uri = urlsplit(uri)
-                record_name = parsed_uri.netloc
-                record_type = 'URLFWD'
-                zone_id = self.zones.get(existing.zone.name, False)
-                if (
-                    existing_name == record_name
-                    and existing_type == record_type
-                ):
-                    path = f'/zones/{zone_id}/pagerules/{record["id"]}'
-                    self._try_request('DELETE', path)
-            else:
-                if (
-                    existing_name == record['name']
-                    and existing_type == record['type']
-                ):
-                    path = (
-                        f'/zones/{record["zone_id"]}/dns_records/'
-                        f'{record["id"]}'
-                    )
-                    self._try_request('DELETE', path)
+            rtype = record['type'][:-6]
+            rec_id = record['id']
+            props = record['properities']
+            zone_id = props['parentId']
+            if rtype == 'Generic':
+                rtype = props['type']
+            elif rtype == 'Alias':
+                rtype = 'CNAME'
+            if (
+                existing_name == props['absoluteName']
+                and existing_type == rtype
+            ):
+                params = {'objectId': rec_id }
+                self._try_request('DELETE', '/delete', params=params)
 
     def _apply(self, plan):
         desired = plan.desired
@@ -984,10 +880,5 @@ class BlueCatProvider(BaseProvider):
                 continue
             elif desired_record in changed_records:  # Already being updated
                 continue
-
-            if self._record_is_proxied(
-                existing_record
-            ) != self._record_is_proxied(desired_record):
-                extra_changes.append(Update(existing_record, desired_record))
 
         return extra_changes
