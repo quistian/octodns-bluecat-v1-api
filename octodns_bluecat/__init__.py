@@ -270,6 +270,7 @@ class BlueCatProvider(BaseProvider):
         self.view_id = view_id
         self.retry_count = retry_count
         self.retry_period = retry_period
+        self.comment = 'OctoDNS generated'
 
         self._zones = None
         self._zone_records = {}
@@ -491,18 +492,34 @@ class BlueCatProvider(BaseProvider):
             'values': values,
         }
 
+    """
+    Data from BC Export Entities to YAML
+    YAML:
+    _sip._tcp:
+      ttl: 600
+      type: SRV
+      value:
+        port: 5060
+        priority: 10
+        target: host.123.test.
+        weight: 20
+
+    BC Export Entities -> get_entity_tree format: JSON
+    {
+     'name': 'sipper', 'id': 2915682, 'type': 'SRVRecord',
+     'properties': {'comments': 'Generic SRV record', 'linkedRecordName': 'host.bozo.test', 'port': 5060, 'absoluteName': 'sipper.bozo.test', 'weight': 20, 'priority': 10, 'parentId': 2915662, 'parentType': 'Zone'}
+    }
+    """
+
     def _data_for_SRV(self, _type, records):
         values = []
         for r in records:
             props = r['properties']
-            values.append(
-                {
-                    'port': props['port'],
-                    'priority': props['priority'],
-                    'target': f'{props["linkedRecordName"]}.',
-                    'weight': props['weight'],
-                }
-            )
+            dd = dict()
+            for tag in ['port', 'priority', 'weight']:
+                dd[tag] = props[tag]
+            dd['target'] = f'{props["linkedRecordName"]}.'
+            values.append(dd)
         return {
             'type': _type,
             'ttl': self._ttl_data(records[0]['properties']),
@@ -590,112 +607,131 @@ class BlueCatProvider(BaseProvider):
             rr_type = bc_type
         return rr_type
 
+    """
+     NAPTRRecord addEntity format
+         {'id': 2915679, 'name': 'naptr', 'type': 'NAPTRRecord',
+         'properties': 'comments=Test NAPTR record|absoluteName=naptr.123.test|order=100|preference=10|service=SIP|regexp=!^.*$!sip:customer-service@bozo.test!|replacement=mx.bozo.test|flags=S|'}
+
+    """
     def _params_for_NAPTR(self, record):
+        zone_name = record.zone.name
+        fqdn = f'{record.name}.{zone_name}'[:-1]
         for value in record.values:
-            content = (
-                f'{value.order} {value.preference} "{value.flags}" '
-                f'"{value.service}" "{value.regexp}" {value.replacement}'
-            )
-            yield {
-                'rdata': content,
-                'name': record.name,
-                'ttl': record.ttl,
-                'type': record._type,
+            props = f'comments={self.comment}|ttl={record.ttl}|absoluteName={fqdn}|order={value.order}|preference={value.preference}|service=value.service|regexp={value.regexp}|replacement={value.replacement}|flags={value.flags}'
+            entity = {
+                    'name': record.name,
+                    'type': f'{record._type}Record',
+                    'properties': props
             }
+            yield entity
 
-    def _params_for_single(self, record):
-        yield {
-            'rdata': record.value,
-            'name': record.name,
-            'ttl': record.ttl,
-            'type': record._type
+    """
+    BC addEntity format
+    {'id': 2915674, 'name': 'mailer', 'type': 'AliasRecord', 'properties': 'comments=Generic CNAME|absoluteName=mailer.123.test|linkedRecordName=mx.bozo.test|'}
+    """
+    def _params_for_CNAME(self, record):
+        zone_name = record.zone.name
+        fqdn = f'{record.name}.{zone_name}'[:-1]
+        props = f'comments={self.comment}|ttl={record.ttl}|absoluteName={fqdn}|linkedRecordName={record.value}|'
+        entity = {
+                'name': record.name,
+                'type': 'AliasRecord',
+                'properties': props
         }
+        yield entity
 
-    _params_for_CNAME = _params_for_single
-
+    """
+    BC addEntity format
+    {'id': 2915671, 'name': 'mail', 'type': 'MXRecord', 'properties': 'comments=Generic MX record|absoluteName=mail.123.test|linkedRecordName=mx.bozo.test|priority=10|'}
+    """
     def _params_for_MX(self, record):
+        zone_name = record.zone.name
+        fqdn = f'{record.name}.{zone_name}'[:-1]
         for value in record.values:
-            yield {
-                'rdata': value.exchange,
+            props = f'comments={self.comment}|ttl={record.ttl}|absoluteName={fqdn}|linkedRecordName={value.exchange[:-1]}|priority={value.preference}|'
+            entity = {
                 'name': record.name,
-                'priority': value.preference,
-                'ttl': record.ttl,
-                'type': record._type
+                'type': f'{record._type}Record',
+                'properties': props
             }
+            yield entity
 
+    """
+    Prepares data to be written into from YAML to BC addEntity Format:
+    YAML:
+    _sip._tcp:
+      ttl: 600
+      type: SRV
+      value:
+        port: 5060
+        priority: 10
+        target: host.123.test.
+        weight: 20
+    BC SRVRecord Entity
+    {
+        'id': 2917727, 'name': '_sip._tcp', 'type': 'SRVRecord',
+        'properties': 'comments=Need to reformat|ttl=600|absoluteName=_sip._tcp.123.test|linkedRecordName=host.123.test|port=5060|priority=10|weight=20|'
+    }
+
+    """
     def _params_for_SRV(self, record):
+        zone_name = record.zone.name
+        fqdn = f'{record.name}.{zone_name}'[:-1]
         for value in record.values:
-            yield {
-                'rdata': f'{value.priority} {value.weight} {value.port} {value.target}',
-                'name': record.name,
-                'ttl': record.ttl,
-                'type': record._type,
+            props = f'comments={self.comment}|ttl={record.ttl}|absoluteName={fqdn}|linkedRecordName={value.target[:-1]}|port={value.port}|priority={value.priority}|weight={value.weight}|'
+            entity = {
+                    'name': record.name,
+                    'type': f'{record._type}Record',
+                    'properties': props,
             }
+            yield entity
 
+    """
+    TXTRecord Entity
+    {'id': 2519630, 'name': '', 'type': 'TXTRecord', 'properties': 'comments=Zone Information|ttl=7600|absoluteName=yes.uoft.ca|txt=STOP GO|'}
+    """
     def _params_for_TXT(self, record):
+        zone_name = record.zone.name
+        fqdn = f'{record.name}.{zone_name}'[:-1]
+        rr_type = f'{record._type}Record'
         for value in record.values:
-            yield {
-                'rdata': value.replace('\\;', ';'),
+            text = value.replace('\\;', ';')
+            props = f'comments={self.comment}|ttl={record.ttl}|absoluteName={fqdn}|txt={text}|'
+            entity = {
                 'name': record.name,
-                'ttl': record.ttl,
-                'type': record._type,
+                'type': rr_type,
+                'properties': props
             }
+            yield entity
 
+    """
+    GenericRecord: A record
+    {'id': 2915663, 'name': 'generic', 'type': 'GenericRecord', 'properties': 'comments=Generic generic record|ttl=7200|absoluteName=generic.123.test|type=A|rdata=128.100.102.10|'}
+    """
     def _params_for_multiple(self, record):
+        zone_name = record.zone.name
+        fqdn = f'{record.name}.{zone_name}'[:-1]
         for value in record.values:
-            yield {
-                'rdata': value,
+            props = f'comments={self.comment}|ttl={record.ttl}|absoluteName={fqdn}|type={record._type}|rdata={value}|'
+            entity = {
                 'name': record.name,
-                'ttl': record.ttl,
-                'type': record._type,
+                'type': f'GenericRecord',
+                'properties': props
             }
+            yield entity
 
     _params_for_A = _params_for_multiple
     _params_for_AAAA = _params_for_multiple
-    _params_for_SPF = _params_for_multiple
-
-    def _contents_for_LOC(self, record):
-        for value in record.values:
-            yield {
-                'data': {
-                    'lat_degrees': value.lat_degrees,
-                    'lat_minutes': value.lat_minutes,
-                    'lat_seconds': value.lat_seconds,
-                    'lat_direction': value.lat_direction,
-                    'long_degrees': value.long_degrees,
-                    'long_minutes': value.long_minutes,
-                    'long_seconds': value.long_seconds,
-                    'long_direction': value.long_direction,
-                    'altitude': value.altitude,
-                    'size': value.size,
-                    'precision_horz': value.precision_horz,
-                    'precision_vert': value.precision_vert,
-                }
-            }
 
     # data['properties'] = f'comments={comments}|ttl={ttl}|absoluteName={fqdn}|linkedRecordName={val}|port={prt}|priority={pri}|weight={wgt}|'
     # data['properties'] = f'comments={comments}|ttl={ttl}|absoluteName={fqdn}|order={order}|preference={pref}|service={srv}|regex={regex}|replacement={rep}|flags={flags}|'
-    def _record_create(self, pid, zname, rr_info):
-        comments = "Created by OctoDNS"
-        rr_type = rr_info['type']
-        if rr_info['type'] in self.BC_RR_TYPE_MAP:
-            bc_map = self.BC_RR_TYPE_MAP[rr_type]
-            bc_type = bc_map['obj_type']
-            bc_key = bc_map['prop_keys'][0]
-            ttl = rr_info['ttl']
-            hname = rr_info['name']
-            fqdn = f'{hname}.{zname}'
-            props = f'comments={comments}|ttl={ttl}|absoluteName={fqdn}|{bc_key}={rr_info["rdata"]}|'
-            if bc_type == 'GenericRecord':
-                props = f'{props}type={rr_type}'
-            ent = {
-                'name': rr_info['name'],
-                'type': bc_type,
-                'properties': props
-            }
-            path = 'addEntity'
-            params = {'parentId': pid}
-            self._try_request('POST', path, params=params, data=ent)
+    def _record_create(self, pid, ent):
+        path = 'addEntity'
+        params = {'parentId': pid}
+        self.log.debug(
+            f'_record_create: zoneID={pid} payload: {ent}'
+        )
+        self._try_request('POST', path, params=params, data=ent)
 
     def _record_delete(self, ent_id):
         path = 'delete'
@@ -709,8 +745,7 @@ class BlueCatProvider(BaseProvider):
         zone_id = self.zones[zone_name]
         params_for = getattr(self, f'_params_for_{new._type}')
         for params in params_for(new):
-            self._record_create(zone_id, zone_name[:-1], params)
-
+            self._record_create(zone_id, params)
 
     def _apply_Delete(self, change):
         existing = change.existing
