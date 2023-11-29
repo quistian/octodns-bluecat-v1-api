@@ -301,7 +301,7 @@ class BlueCatProvider(BaseProvider):
         )
         self.log.debug('_request:   status=%d', resp.status_code)
         if resp.status_code == 400:
-            self.log.debug('_request:   data=%s', data)
+            self.log.debug('_request: data = %s', data)
             raise BlueCatError(resp.json())
         if resp.status_code == 403:
             raise BlueCatAuthenticationError(resp.json())
@@ -334,20 +334,34 @@ class BlueCatProvider(BaseProvider):
 
     """
     All RRs using ExportEntities and a get_entitity tree selector:
-    {'name': 'generic', 'id': 2915663, 'type': 'GenericRecord', 'properties': {'comments': 'Generic generic record', 'absoluteName': 'generic.123.test', 'rdata': '128.100.102.10', 'type': 'A', 'ttl': 7200, 'parentId': 2915662, 'parentType': 'Zone'}}
-    {'name': 'q278_test', 'id': 2915683, 'type': 'GenericRecord', 'properties': {'comments': 'Aure like record', 'absoluteName': 'q278_test.bozo.test', 'rdata': '10.141.1.2', 'type': 'A', 'parentId': 2915662, 'parentType': 'Zone'}}
-    {'name': 'ptr', 'id': 2917713, 'type': 'GenericRecord', 'properties': {'comments': 'Adding a PTR record', 'absoluteName': 'ptr.123.test', 'rdata': '10.141.10.1', 'type': 'PTR', 'ttl': 900, 'parentId': 2915662, 'parentType': 'Zone'}}
-    {'name': 'spf', 'id': 2917715, 'type': 'GenericRecord', 'properties': {'comments': 'SPF record test', 'absoluteName': 'spf.123.test', 'rdata': 'Funky SPF data', 'type': 'SPF', 'ttl': 9999, 'parentId': 2915662, 'parentType': 'Zone'}}
-    {'name': 'text', 'id': 2915664, 'type': 'TXTRecord', 'properties': {'txt': 'Test Text Record', 'comments': 'Generic TXT Record', 'absoluteName': 'text.bozo.test', 'parentId': 2915662, 'parentType': 'Zone'}}
-    {'name': 'moretext', 'id': 2915665, 'type': 'TXTRecord', 'properties': {'txt': 'Two Txt Records', 'comments': 'YATR OK', 'absoluteName': 'moretext.bozo.test', 'parentId': 2915662, 'parentType': 'Zone'}}
-    {'name': 'mx', 'id': 2915667, 'type': 'GenericRecord', 'properties': {'comments': 'SMTP host', 'absoluteName': 'mx.bozo.test', 'rdata': '128.100.103.17', 'type': 'A', 'parentId': 2915662, 'parentType': 'Zone'}}
-    {'name': 'mail', 'id': 2915671, 'type': 'MXRecord', 'properties': {'comments': 'Generic MX record', 'linkedRecordName': 'mx.bozo.test', 'absoluteName': 'mail.bozo.test', 'priority': 10, 'parentId': 2915662, 'parentType': 'Zone'}}
-    {'name': 'mx', 'id': 2915672, 'type': 'HINFORecord', 'properties': {'comments': 'Generic HINFO record', 'os': 'OpenBSD', 'absoluteName': 'mx.bozo.test', 'cpu': 'x86', 'parentId': 2915662, 'parentType': 'Zone'}}
-    {'name': 'mailer', 'id': 2915674, 'type': 'AliasRecord', 'properties': {'comments': 'Generic CNAME', 'linkedRecordName': 'mx.bozo.test', 'absoluteName': 'mailer.bozo.test', 'parentId': 2915662, 'parentType': 'Zone'}}
-    {'name': 'host', 'id': 2915676, 'type': 'HostRecord', 'properties': {'addresses': '10.10.10.10', 'comments': 'Generic Host record', 'absoluteName': 'host.bozo.test', 'reverseRecord': True, 'addressIds': '2520866', 'parentId': 2915662, 'parentType': 'Zone'}}
-    {'name': 'toast', 'id': 2915677, 'type': 'AliasRecord', 'properties': {'comments': 'Generic Host record', 'linkedRecordName': 'host.bozo.test', 'absoluteName': 'toast.bozo.test', 'parentId': 2915662, 'parentType': 'Zone'}}
-    {'name': 'naptr', 'id': 2915679, 'type': 'NAPTRRecord', 'properties': {'regexp': '!^.*$!sip:customer-service@bozo.test!', 'comments': 'Test NAPTR record', 'absoluteName': 'naptr.bozo.test', 'service': 'SIP', 'preference': 10, 'flags': 'S', 'replacement': 'mx.bozo.test', 'parentId': 2915662, 'parentType': 'Zone', 'order': 100}}
-    {'name': 'sipper', 'id': 2915682, 'type': 'SRVRecord', 'properties': {'comments': 'Generic SRV record', 'linkedRecordName': 'host.bozo.test', 'port': 5060, 'absoluteName': 'sipper.bozo.test', 'weight': 20, 'priority': 10, 'parentId': 2915662, 'parentType': 'Zone'}}
+    {'name': 'generic', 'id': 2915663, 'type': 'GenericRecord', 
+      'properties': {'comments': 'Generic generic record', 'absoluteName': 'generic.123.test', 'rdata': '128.100.102.10', 'type': 'A', 'ttl': 7200, 'parentId': 2915662, 'parentType': 'Zone'}}
+    {'name': 'q278_test', 'id': 2915683, 'type': 'GenericRecord',
+    'properties': {'comments': 'Aure like record', 'absoluteName': 'q278_test.bozo.test', 'rdata': '10.141.1.2', 'type': 'A', 'parentId': 2915662, 'parentType': 'Zone'}}
+    {'name': 'ptr', 'id': 2917713, 'type': 'GenericRecord',
+    'properties': {'comments': 'Adding a PTR record', 'absoluteName': 'ptr.123.test', 'rdata': '10.141.10.1', 'type': 'PTR', 'ttl': 900, 'parentId': 2915662, 'parentType': 'Zone'}}
+    {'name': 'spf', 'id': 2917715, 'type': 'GenericRecord',
+    'properties': {'comments': 'SPF record test', 'absoluteName': 'spf.123.test', 'rdata': 'Funky SPF data', 'type': 'SPF', 'ttl': 9999, 'parentId': 2915662, 'parentType': 'Zone'}}
+    {'name': 'text', 'id': 2915664, 'type': 'TXTRecord',
+    'properties': {'txt': 'Test Text Record', 'comments': 'Generic TXT Record', 'absoluteName': 'text.bozo.test', 'parentId': 2915662, 'parentType': 'Zone'}}
+    {'name': 'moretext', 'id': 2915665, 'type': 'TXTRecord',
+    'properties': {'txt': 'Two Txt Records', 'comments': 'YATR OK', 'absoluteName': 'moretext.bozo.test', 'parentId': 2915662, 'parentType': 'Zone'}}
+    {'name': 'mx', 'id': 2915667, 'type': 'GenericRecord',
+    'properties': {'comments': 'SMTP host', 'absoluteName': 'mx.bozo.test', 'rdata': '128.100.103.17', 'type': 'A', 'parentId': 2915662, 'parentType': 'Zone'}}
+    {'name': 'mail', 'id': 2915671, 'type': 'MXRecord',
+    'properties': {'comments': 'Generic MX record', 'linkedRecordName': 'mx.bozo.test', 'absoluteName': 'mail.bozo.test', 'priority': 10, 'parentId': 2915662, 'parentType': 'Zone'}}
+    {'name': 'mx', 'id': 2915672, 'type': 'HINFORecord',
+    'properties': {'comments': 'Generic HINFO record', 'os': 'OpenBSD', 'absoluteName': 'mx.bozo.test', 'cpu': 'x86', 'parentId': 2915662, 'parentType': 'Zone'}}
+    {'name': 'mailer', 'id': 2915674, 'type': 'AliasRecord',
+    'properties': {'comments': 'Generic CNAME', 'linkedRecordName': 'mx.bozo.test', 'absoluteName': 'mailer.bozo.test', 'parentId': 2915662, 'parentType': 'Zone'}}
+    {'name': 'host', 'id': 2915676, 'type': 'HostRecord',
+    'properties': {'addresses': '10.10.10.10', 'comments': 'Generic Host record', 'absoluteName': 'host.bozo.test', 'reverseRecord': True, 'addressIds': '2520866', 'parentId': 2915662, 'parentType': 'Zone'}}
+    {'name': 'toast', 'id': 2915677, 'type': 'AliasRecord',
+    'properties': {'comments': 'Generic Host record', 'linkedRecordName': 'host.bozo.test', 'absoluteName': 'toast.bozo.test', 'parentId': 2915662, 'parentType': 'Zone'}}
+    {'name': 'naptr', 'id': 2915679, 'type': 'NAPTRRecord',
+    'properties': {'regexp': '!^.*$!sip:customer-service@bozo.test!', 'comments': 'Test NAPTR record', 'absoluteName': 'naptr.bozo.test', 'service': 'SIP', 'preference': 10, 'flags': 'S', 'replacement': 'mx.bozo.test', 'parentId': 2915662, 'parentType': 'Zone', 'order': 100}}
+    {'name': 'sipper', 'id': 2915682, 'type': 'SRVRecord',
+    'properties': {'comments': 'Generic SRV record', 'linkedRecordName': 'host.bozo.test', 'port': 5060, 'absoluteName': 'sipper.bozo.test', 'weight': 20, 'priority': 10, 'parentId': 2915662, 'parentType': 'Zone'}}
 
     Format of RRs. from getEntities
     params = {'parentId': id, type='GenericRecord', start=0, count=100}
@@ -387,9 +401,11 @@ class BlueCatProvider(BaseProvider):
                 ents.append(json.loads(decoded_line))
         return ents
 
+    
     def _export_zone_entities(self):
         zones = self._export_entities('Zone', self.view_id)
         return zones
+
 
     def _export_leaf_zone_entities(self):
         ents = []
@@ -399,12 +415,14 @@ class BlueCatProvider(BaseProvider):
                 ents.append(zone)
         return ents
 
+
     # return the ttl value in a properties dict else the default
     def _ttl_data(self, props):
         if 'ttl' in props:
             return props['ttl']
         else:
             return self.MIN_TTL
+
 
     def _data_for_generic(self, _type, records):
         return {
@@ -418,12 +436,14 @@ class BlueCatProvider(BaseProvider):
     _data_for_A6 = _data_for_generic
     _data_for_SPF = _data_for_generic
 
+
     def _data_for_HOST(self, _type, records):
         return {
             'ttl': self._ttl_data(records[0]['properties']),
             'type': 'A',
             'values': [r['properties']['addresses'] for r in records],
         }
+
 
     def _data_for_TXT(self, _type, records):
         values = [r['properties']['txt'].replace(';', '\\;') for r in records]
@@ -432,6 +452,7 @@ class BlueCatProvider(BaseProvider):
             'type': _type,
             'values': values
         }
+
 
     def _data_for_CNAME(self, _type, records):
         props = records[0]['properties']
@@ -442,6 +463,7 @@ class BlueCatProvider(BaseProvider):
         }
 
     _data_for_Alias = _data_for_CNAME
+
 
     def _data_for_HINFO(self, _type, records):
         values = []
@@ -454,6 +476,7 @@ class BlueCatProvider(BaseProvider):
             'type': _type,
             'values': values
         }
+
 
     def _data_for_MX(self, _type, records):
         values = []
@@ -471,6 +494,7 @@ class BlueCatProvider(BaseProvider):
             'type': _type,
             'values': values
         }
+
 
     def _data_for_NAPTR(self, _type, records):
         values = []
@@ -526,6 +550,7 @@ class BlueCatProvider(BaseProvider):
             'values': values,
         }
 
+
     # gets the RRs for a ZONE using the ExportEntities API function
     # returns a list of RRs, as BC entities
     # sets _zone_records['zonename']  subclass as the list of BC RRs for a zone
@@ -543,11 +568,13 @@ class BlueCatProvider(BaseProvider):
             self._zone_records[zone.name] = records
         return self._zone_records[zone.name]
 
+
     def _record_for(self, zone, name, _type, records, lenient):
         data_for = getattr(self, f'_data_for_{_type}')
         data = data_for(_type, records)
         record = Record.new(zone, name, data, source=self, lenient=lenient)
         return record
+
 
     def list_zones(self):
         return sorted(self.zones.keys())
