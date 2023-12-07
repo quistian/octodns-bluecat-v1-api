@@ -36,8 +36,8 @@ description, long_description = descriptions()
 tests_require = ('pytest', 'pytest-cov', 'pytest-network', 'requests_mock')
 
 setup(
-    author='Enterprise Infrastructure Solutions',
-    author_email='test@eis.utoronto.ca',
+    author='Russell Sutherland Enterprise Infrastructure Solutions',
+    author_email='russell.sutherland@utoronto.ca',
     description=description,
     extras_require={
         'dev': tests_require
@@ -55,7 +55,7 @@ setup(
         ),
         'test': tests_require,
     },
-    install_requires=('octodns>=0.9.20', 'requests>=2.27.0'),
+    install_requires=('click>=7.0.0', 'octodns>=0.9.20', 'octodns-powerdns>=0.0.4', 'requests>=2.27.0'),
     license='MIT',
     long_description=long_description,
     long_description_content_type='text/markdown',
