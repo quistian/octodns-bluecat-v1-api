@@ -13,7 +13,7 @@ def descriptions():
 
 def version():
     version = 'unknown'
-    with open('octodns_bluecat/__init__.py') as fh:
+    with open('octodns_bluecat_v1/__init__.py') as fh:
         for line in fh:
             if line.startswith('__VERSION__'):
                 version = line.split("'")[1]
@@ -55,14 +55,14 @@ setup(
         ),
         'test': tests_require,
     },
-    install_requires=('click>=7.0.0', 'octodns>=0.9.20', 'octodns-powerdns>=0.0.4', 'requests>=2.27.0'),
+    install_requires=('click>=7.0.0', 'octodns>=0.9.20', 'requests>=2.27.0'),
     license='MIT',
     long_description=long_description,
     long_description_content_type='text/markdown',
-    name='octodns-bluecat',
+    name='octodns-bluecat-v1',
     packages=find_packages(),
     python_requires='>=3.6',
     tests_require=tests_require,
-    url='https://github.com/octodns/octodns-bluecat',
+    url='https://github.com/octodns/octodns-bluecat-v1',
     version=version(),
 )
