@@ -10,6 +10,8 @@ env/
 venv/
 bc-zones/
 htmlcov/
+AUTHORS.rst
+CONTRIBUTING.rst
 go
 nosetests.xml
 coverage.xml
