@@ -12,7 +12,7 @@ from octodns.provider.base import BaseProvider
 from octodns.record import Record
 from octodns.idna import IdnaDict
 
-__VERSION__ = '0.0.1'
+__VERSION__ = '0.0.2'
 
 class BlueCatClientException(ProviderException):
     pass
