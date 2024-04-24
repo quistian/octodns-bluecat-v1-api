@@ -117,7 +117,7 @@ class BlueCatClient(object):
         params = {
             'selectCriteria': json.dumps(select),
             'start': 0,
-            'count': 3000
+            'count': 60000
         }
         self.log.debug('_export_entities: types=%s params=%s', types, params)
         resp = self._try_request('GET', 'exportEntities', params=params, stream=True)
