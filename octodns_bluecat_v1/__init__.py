@@ -12,7 +12,7 @@ from octodns.provider.base import BaseProvider
 from octodns.record import Record
 from octodns.idna import IdnaDict
 
-__VERSION__ = '0.0.2'
+__VERSION__ = '0.0.3'
 
 class BlueCatClientException(ProviderException):
     pass
@@ -226,7 +226,7 @@ class BlueCatProvider(BaseProvider):
         *args,
         **kwargs
     ):
-        self.log = getLogger('BlueCatProvider[{id}]')
+        self.log = getLogger(f'BlueCatProvider[{id}]')
         self.log.debug(f'__init__: id={id}, username={username}, token=***, password=***')
         super().__init__(id, *args, **kwargs)
 
@@ -391,7 +391,7 @@ class BlueCatProvider(BaseProvider):
         params = {
             'selectCriteria': json.dumps(select),
             'start': 0,
-            'count': 3000
+            'count': 60000
         }
         self.log.debug('_export_entities: types=%s params=%s', types, params)
         resp = self._try_request('GET', 'exportEntities', params=params, stream=True)
