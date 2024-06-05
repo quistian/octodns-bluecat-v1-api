@@ -13,7 +13,7 @@ from octodns.record import Record
 from octodns.idna import IdnaDict
 
 
-__version__ = __VERSION__ = '0.0.4'
+__version__ = __VERSION__ = '1.0.0'
 
 # Client Exceptions
 class BlueCatClientException(ProviderException):
