@@ -12,19 +12,25 @@ from octodns.provider.base import BaseProvider
 from octodns.record import Record
 from octodns.idna import IdnaDict
 
-__VERSION__ = '0.0.3'
 
+__version__ = __VERSION__ = '0.0.4'
+
+# Client Exceptions
 class BlueCatClientException(ProviderException):
     pass
+
 
 class BlueCatClientNotFound(BlueCatClientException):
     def __init__(self):
         super().__init__('Not Found')
 
+
 class BlueCatClientUnauthorized(BlueCatClientException):
     def __init__(self):
         super().__init__('Unauthorized')
 
+
+# BlueCat Errors
 class BlueCatError(ProviderException):
     def __init__(self, data):
         try:
@@ -33,9 +39,11 @@ class BlueCatError(ProviderException):
             message = 'BlueCatError error'
         super().__init__(message)
 
+
 class BlueCatAuthenticationError(BlueCatError):
     def __init__(self, data):
         BlueCatError.__init__(self, data)
+
 
 class BlueCatRateLimitError(BlueCatError):
     def __init__(self, data):
@@ -44,54 +52,71 @@ class BlueCatRateLimitError(BlueCatError):
 
 class BlueCatClient(object):
 
-    def __init__(self, token):
+    TIMEOUT = 15
+
+    def __init__(self, endpnt, uname, pw, confname, viewname):
+        self.log = getLogger(f'BlueCatClient[{id}]')
+        self.log.debug(f'__init__: id={id}, username={uname}, token=***, password=***')
         sess = Session()
-        if self.username and self.password:
-            # Generate token
-            resp = self._request(
-                'GET',
-                path='login',
-                params={'username': username, 'password': password}
+        self._sess = sess
+        self.endpoint = endpnt
+        self.retry_count=4,
+        self.retry_period=250,
+
+        # Generate token
+        resp = self._request(
+            'GET',
+            path='login',
+            params={'username': uname, 'password': pw}
+        )
+        self.log.debug(f'client: __init__: _request: resp: {resp}')
+        if 'BAMAuthToken' in resp:
+            token = re.findall('BAMAuthToken: (.+) <-', resp)[0]
+            sess.headers.update(
+                {
+                    'Authorization': f'BAMAuthToken: {token}',
+                    'Content-Type': 'application/json',
+                    'User-Agent': f'octodns/{octodns_version} octodns-bluecat/{__VERSION__}',
+                }
             )
-            if 'BAMAuthToken' in resp:
-                token = re.findall('BAMAuthToken: (.+) <-', resp)[0]
-                self.token = token
-            else:
-                raise BlueCatError('Could not generate token.')
+            self.log.debug('__init__: token=%s header=%s', token, sess.headers)
         else:
-            self.token = token
-        sess.headers.update({'Authorization': f'BAMAuthToken: {token}'})
-        sess.headers.update({'Content-Type': 'application/json'})
-        sess.headers.update({'User-Agent': f'octodns/{octodns_version} octodns-bluecat/{__VERSION__}'})
-        self.log.debug('_init: token=%s header=%s', token, sess.headers)
+            raise BlueCatError('Could not generate token.')
+
         # get the BC Configuration and View Ids
         resp = self._request(
-                'GET',
-                path='getEntityByName',
-                params = {'parentId': 0, 'name': confname, 'type': 'Configuration'}
+            'GET',
+            path='getEntityByName',
+            params = {
+                'parentId': 0,
+                'name': confname,
+                'type': 'Configuration',
+            }
         )
-        self.log.debug('_init: conf_entity: %s', resp)
+        self.log.debug('__init__: conf_entity: %s', resp)
         conf_id = resp['id']
-        rv = self._request(
-                'GET',
-                path='getEntityByName',
-                params = {'parentId': conf_id, 'name': viewname, 'type': 'View'}
+
+        resp = self._request(
+            'GET',
+            path='getEntityByName',
+            params = {
+                'parentId': conf_id,
+                'name': viewname,
+                'type': 'View',
+            }
         )
-        self.log.debug('_init: view_entity: %s', rv)
-        view_id = rv['id']
-        self.conf_id = conf_id
+        self.log.debug('_init: view_entity: %s', resp)
+        view_id = resp['id']
         self.view_id = view_id
-        self._sess = sess
 
     def _request(self, method, path, params=None, data=None, stream=False):
         url = f'https://{self.endpoint}/Services/REST/v1/{path}'
-        self.log.debug('_request: method=%s, path=%s', method, path)
         resp = self._sess.request(
             method, url, params=params, json=data, timeout=self.TIMEOUT, stream=stream
         )
-        self.log.debug('_request:   status=%d', resp.status_code)
+        self.log.debug('_request:  status=%d', resp.status_code)
         if resp.status_code == 400:
-            self.log.debug('_request:   data=%s', data)
+            self.log.debug(f'_request:  resp={resp.text}')
             raise BlueCatError(resp.json())
         if resp.status_code == 401:
             raise BlueCatClientUnauthorized()
@@ -104,9 +129,112 @@ class BlueCatClient(object):
         resp.raise_for_status()
         if path == 'exportEntities':
             return resp
+        elif path == 'getEntities':
+            return resp.json()
+        elif path == 'delete':
+            return
         else:
             return resp.json()
 
+    # a wrapper around request to deal with delays
+    def _try_request(self, *args, **kwargs):
+        tries = self.retry_count
+        while True:  # We'll raise to break after our tries expire
+            try:
+                return self._request(*args, **kwargs)
+            except BlueCatRateLimitError:
+                if tries <= 1:
+                    raise
+                tries -= 1
+                self.log.warning(
+                    'rate limit encountered, pausing '
+                    'for %ds and trying again, %d remaining',
+                    self.retry_period,
+                    tries,
+                )
+                sleep(self.retry_period)
+
+
+    # generates a dictionary of zones which contain one or more RRs as keys and
+    # their respective entity ID as values
+    # generates a list of zones which contain one or more RRs:
+
+    def domains(self):
+        zones = list()
+        zone_names = list()
+        rr_ents = self._export_entities('GenericRecord,AliasRecord', self.view_id)
+        for rr_ent in rr_ents:
+            props = rr_ent['properties']
+            pid = props['parentId']
+            rr_fqdn = props['absoluteName']
+            z_name = rr_fqdn[len(rr_ent['name'])+1:]
+            if z_name not in zone_names:
+                zone_names.append(z_name)
+                zones.append({'name': z_name, 'id': pid})
+        return zones
+
+    # determines if a zone exists
+    def domain(self, zone):
+        params = {
+            'start': 0,
+            'count': 1,
+            'containerId': self.view_id,
+            'options': f'hint={zone}|overrideType=Zone|accessRight=VIEW',
+        }
+        self.log.debug(f'domain: _get_zones_by_hint: params={params}')
+        return self._request('GET', 'getZonesByHint', params=params)
+
+    def domain_create(self, name):
+        self.log.debug(f'domain_create: creating {name}')
+        data = {
+            'parentId': self.view_id,
+            'absoluteName': name, 
+            'properties': 'deployable=false|dynamicUpdate=false',
+        }
+        resp = self._request('POST', 'addZone', data=data)
+        zone_id = resp['id']
+        return zone_id
+
+    # types =  "HostRecord,AliasRecord,MXRecord,SRVRecord,TXTRecord,HINFORecord,NAPTRRecord,GenericRecord"
+    # records = self._export_entities(types, zone_id)
+    # 'properties': 'comments=A solo A Resource Record|absoluteName=Q277_test.277.privatelink.ods.opinsights.azure.com|type=A|rdata=10.141.45.196|'
+    def records(self, zone_id):
+        rrs = []
+        if not zone_id:
+            return []
+        for typ in ["GenericRecord", "HostRecord", "AliasRecord"]:
+            ents = self._get_entities(zone_id, typ)
+            for ent in ents:
+                prop_data = dict()
+                prop_str = ent['properties']
+                toks = prop_str.split('|')
+                for tok in toks:
+                    if len(tok):
+                        (key, val) = tok.split('=')
+                        prop_data[key] = val
+                ent['properties'] = prop_data
+                rrs.append(ent)
+        return rrs
+
+    # data['properties'] = f'comments={comments}|ttl={ttl}|absoluteName={fqdn}|linkedRecordName={val}|port={prt}|priority={pri}|weight={wgt}|'
+    # data['properties'] = f'comments={comments}|ttl={ttl}|absoluteName={fqdn}|order={order}|preference={pref}|service={srv}|regex={regex}|replacement={rep}|flags={flags}|'
+    def record_create(self, pid, ent):
+        params = {'parentId': pid}
+        self.log.debug(f'record_create: zoneID={pid} payload: {ent}')
+        self._request('POST', 'addEntity', params=params, data=ent)
+
+    def record_delete(self, ent_id):
+        self._try_request('DELETE', 'delete', params={'objectId': ent_id})
+
+
+    def _export_zone_entities(self):
+        zones = self._export_entities('Zone', self.view_id)
+        return zones
+
+
+    #
+    # Get all entities and their descendents matching a certain type
+    #
     def _export_entities(self, types, startid):
         ents = []
         select = {
@@ -116,49 +244,40 @@ class BlueCatClient(object):
         }
         params = {
             'selectCriteria': json.dumps(select),
-            'start': 0,
             'count': 60000
         }
-        self.log.debug('_export_entities: types=%s params=%s', types, params)
-        resp = self._try_request('GET', 'exportEntities', params=params, stream=True)
+        self.log.debug(f'_export_entities: types={types} params={params}')
+        resp = self._request(
+            'GET',
+            'exportEntities',
+            params=params,
+            stream=True
+        )
         for line in resp.iter_lines():
             if line:
                 decoded_line = line.decode('utf-8')
                 ents.append(json.loads(decoded_line))
         return ents
 
+    # Format of RRs. from getEntities params = {'parentId': id, type='GenericRecord', start=0, count=100}
+    # Generic Records:
+    # [ { 'id': 2866216, 'name': 'Q277_test', 'type': 'GenericRecord',
+    #     'properties': 'comments=A solo A Resource Record|absoluteName=Q277_test.277.privatelink.ods.opinsights.azure.com|type=A|rdata=10.141.45.196|' }, ]
 
-    def _export_leaf_zone_entities(self):
-        ents = []
-        zones = self._export_zone_entities()
-        for zone in zones:
-            if re.match('[0-9][0-9][0-9]', zone['name']):
-                ents.append(zone)
-        return ents
-
-    def _export_zone_entities(self):
-        zones = self._export_entities('Zone', self.view_id)
-        return zones
-
-    # generates a list of all leafs zones
-    def domains(self):
-        return self._export_leaf_zone_entities()
-
-    # determines if a zone exists
-    def domain(self, zone):
+    def _get_entities(self, pid, typ):
         params = {
-            'containerId': self.view_id,
             'start': 0,
-            'count': 1,
-            'options': f'hint={zone}',
+            'count': 200,
+            'parentId': pid,
+            'type': typ,
         }
-        self.log.debug('_get_zones_by_hint: params=%s', params)
-        resp = self._request('GET', 'getZonesByHint', params=params)
-        if len(resp.json()):
-            return True
-        else:
-            return False
-        
+        resp = self._request(
+            'GET',
+            'getEntities',
+            params=params
+        )
+        return resp
+
 
 class BlueCatProvider(BaseProvider):
     SUPPORTS_GEO = False
@@ -210,7 +329,6 @@ class BlueCatProvider(BaseProvider):
         }
 
     MIN_TTL = 3600
-    TIMEOUT = 15
 
     def __init__(
         self,
@@ -220,7 +338,6 @@ class BlueCatProvider(BaseProvider):
         password=None,
         confname=None,
         viewname=None,
-        token=None,
         retry_count=4,
         retry_period=250,
         *args,
@@ -229,107 +346,27 @@ class BlueCatProvider(BaseProvider):
         self.log = getLogger(f'BlueCatProvider[{id}]')
         self.log.debug(f'__init__: id={id}, username={username}, token=***, password=***')
         super().__init__(id, *args, **kwargs)
-
-        sess = Session()
-        self._sess = sess
-        self.endpoint = endpoint
-        if username and password:
-            # Generate token
-            rv = self._request(
-                'GET',
-                path='login',
-                params={'username': username, 'password': password}
-            )
-            if 'BAMAuthToken' in rv:
-                token = re.findall('BAMAuthToken: (.+) <-', rv)[0]
-                self.token = token
-            else:
-                raise BlueCatError('Could not generate token.')
-        else:
-            self.token = token
-        sess.headers.update({'Authorization': f'BAMAuthToken: {token}'})
-        sess.headers.update({'Content-Type': 'application/json'})
-        sess.headers.update({'User-Agent': f'octodns/{octodns_version} octodns-bluecat/{__VERSION__}'})
-        self.log.debug('_init: token=%s header=%s', token, sess.headers)
-        # get the BC Configuration and View Ids
-        rv = self._request(
-                'GET',
-                path='getEntityByName',
-                params = {'parentId': 0, 'name': confname, 'type': 'Configuration'}
-        )
-        self.log.debug('_init: conf_entity: %s', rv)
-        conf_id = rv['id']
-        rv = self._request(
-                'GET',
-                path='getEntityByName',
-                params = {'parentId': conf_id, 'name': viewname, 'type': 'View'}
-        )
-        self.log.debug('_init: view_entity: %s', rv)
-        view_id = rv['id']
-        self.conf_id = conf_id
-        self.view_id = view_id
-        self.retry_count = retry_count
-        self.retry_period = retry_period
-        self.comment = 'OctoDNS generated'
+        self._client = BlueCatClient(endpoint, username, password, confname, viewname)
 
         self._zones = None
         self._zone_records = {}
+        self.comment = 'OctoDNS generated'
 
-    # a wrapper around request to deal with delays
-    def _try_request(self, *args, **kwargs):
-        tries = self.retry_count
-        while True:  # We'll raise to break after our tries expire
-            try:
-                return self._request(*args, **kwargs)
-            except BlueCatRateLimitError:
-                if tries <= 1:
-                    raise
-                tries -= 1
-                self.log.warning(
-                    'rate limit encountered, pausing '
-                    'for %ds and trying again, %d remaining',
-                    self.retry_period,
-                    tries,
-                )
-                sleep(self.retry_period)
-
-    def _request(self, method, path, params=None, data=None, stream=False):
-        self.log.debug('_request: method=%s, path=%s', method, path)
-        url = f'https://{self.endpoint}/Services/REST/v1/{path}'
-        resp = self._sess.request(
-            method, url, params=params, json=data, timeout=self.TIMEOUT, stream=stream
-        )
-        self.log.debug('_request:   status=%d', resp.status_code)
-        if resp.status_code == 400:
-            self.log.debug('_request: data = %s', data)
-            raise BlueCatError(resp.json())
-        if resp.status_code == 403:
-            raise BlueCatAuthenticationError(resp.json())
-        if resp.status_code == 429:
-            raise BlueCatAuthenticationError(resp.json())
-        resp.raise_for_status()
-        if path == 'exportEntities':
-            return resp
-        elif path == 'delete':
-            return
-        else:
-            return resp.json()
 
     def _change_keyer(self, change):
         key = change.__class__.__name__
         order = {'Delete': 0, 'Create': 1, 'Update': 2}
         return order[key]
 
-    @property
     # returns to OctoDNS a list of all leaf Zones from a Provider as a dictionary:
     # { 'zone1_fqdn': zone1_id, 'zone2_fqdn': zone2_id }
     # _zones becomes a class operator
+
+    @property
     def zones(self):
         if self._zones is None:
-            zones = self._export_leaf_zone_entities()
-            self._zones = IdnaDict(
-                {f'{z["properties"]["absoluteName"]}.': z['id'] for z in zones}
-            )
+            zones = self._client.domains()
+            self._zones = IdnaDict({f'{z["name"]}.': z["id"] for z in zones})
         return self._zones
 
     """
@@ -363,16 +400,6 @@ class BlueCatProvider(BaseProvider):
     {'name': 'sipper', 'id': 2915682, 'type': 'SRVRecord',
     'properties': {'comments': 'Generic SRV record', 'linkedRecordName': 'host.bozo.test', 'port': 5060, 'absoluteName': 'sipper.bozo.test', 'weight': 20, 'priority': 10, 'parentId': 2915662, 'parentType': 'Zone'}}
 
-    Format of RRs. from getEntities
-    params = {'parentId': id, type='GenericRecord', start=0, count=100}
-    Generic Records:
-    [
-     { 'id': 2866216, 'name': 'Q277_test', 'type': 'GenericRecord',
-     'properties': 'comments=A solo A Resource Record|absoluteName=Q277_test.277.privatelink.ods.opinsights.azure.com|type=A|rdata=10.141.45.196|'},
-     { 'id': 2866849, 'name': 'n277_test', 'type': 'GenericRecord',
-     'properties': 'comments=A solo A Resource Record|absoluteName=n277_test.277.privatelink.ods.opinsights.azure.com|type=A|rdata=10.141.118.199|'}
-    ]
-
     MX Records
     [
     {'id': 2429335, 'name': '', 'type': 'MXRecord'}, 'properties': 'ttl=86400|absoluteName=theta.utoronto.ca|linkedRecordName=alt2.aspmx.l.google.com|priority=5|',
@@ -399,20 +426,6 @@ class BlueCatProvider(BaseProvider):
             if line:
                 decoded_line = line.decode('utf-8')
                 ents.append(json.loads(decoded_line))
-        return ents
-
-    
-    def _export_zone_entities(self):
-        zones = self._export_entities('Zone', self.view_id)
-        return zones
-
-
-    def _export_leaf_zone_entities(self):
-        ents = []
-        zones = self._export_zone_entities()
-        for zone in zones:
-            if re.match('[0-9][0-9][0-9]', zone['name']):
-                ents.append(zone)
         return ents
 
 
@@ -554,18 +567,16 @@ class BlueCatProvider(BaseProvider):
     # gets the RRs for a ZONE using the ExportEntities API function
     # returns a list of RRs, as BC entities
     # sets _zone_records['zonename']  subclass as the list of BC RRs for a zone
+
     def zone_records(self, zone):
         self.log.debug(f'zone_records: zone: {zone.name}')
         self.log.debug(f'zone_records: {self._zone_records}')
         if zone.name not in self._zone_records:
             zone_id = self.zones.get(zone.name, False)
-            if not zone_id:
+            try:
+                self._zone_records[zone.name] = self._client.records(zone_id)
+            except BlueCatClientNotFound:
                 return []
-            records = []
-            types = 'HostRecord,AliasRecord,MXRecord,SRVRecord,TXTRecord,HINFORecord,NAPTRRecord,GenericRecord'
-            records = self._export_entities(types, zone_id)
-            self.log.debug('zone_records: zone_id:%s, types=%s, records=%s', zone_id, types, records)
-            self._zone_records[zone.name] = records
         return self._zone_records[zone.name]
 
 
@@ -575,28 +586,22 @@ class BlueCatProvider(BaseProvider):
         record = Record.new(zone, name, data, source=self, lenient=lenient)
         return record
 
-
     def list_zones(self):
         return sorted(self.zones.keys())
 
     # takes the data from BC via the API to prepare it for the (local/yaml) destination
     # calls zone_records to get the RRs on a zone by zone basis
     # values ends up in the YAML Provider
+
     def populate(self, zone, target=False, lenient=False):
-        self.log.debug(
-            'populate: name=%s, target=%s, lenient=%s',
-            zone.name,
-            target,
-            lenient,
-        )
+        self.log.debug(f'populate: name={zone.name}, target={target}, lenient={lenient}')
 
         values = defaultdict(lambda: defaultdict(list))
         for record in self.zone_records(zone):
+            self.log.debug(f'populate: record: {record}')
             _type = self._mod_type(record)
             if _type not in self.SUPPORTS:
-                self.log.warning(
-                    f'populate: skipping unsupported RR type: {_type}'
-                )
+                self.log.warning(f'populate: skipping unsupported RR type: {_type}')
                 continue
             values[record['name']][_type].append(record)
 
@@ -614,11 +619,8 @@ class BlueCatProvider(BaseProvider):
                zone.add_record(record, lenient=lenient)
 
         exists = zone.name in self._zone_records
-        self.log.info(
-            'populate:   found %s records, exists=%s',
-            len(zone.records) - before,
-            exists,
-        )
+        nrecs = len(zone.records) - before
+        self.log.info( f'populate: found {nrecs} records, exists={exists}')
         return exists
 
     # convert from BC RRytpe to regular RRtypes
@@ -750,29 +752,14 @@ class BlueCatProvider(BaseProvider):
     _params_for_A = _params_for_multiple
     _params_for_AAAA = _params_for_multiple
 
-    # data['properties'] = f'comments={comments}|ttl={ttl}|absoluteName={fqdn}|linkedRecordName={val}|port={prt}|priority={pri}|weight={wgt}|'
-    # data['properties'] = f'comments={comments}|ttl={ttl}|absoluteName={fqdn}|order={order}|preference={pref}|service={srv}|regex={regex}|replacement={rep}|flags={flags}|'
-    def _record_create(self, pid, ent):
-        path = 'addEntity'
-        params = {'parentId': pid}
-        self.log.debug(
-            f'_record_create: zoneID={pid} payload: {ent}'
-        )
-        self._try_request('POST', path, params=params, data=ent)
-
-    def _record_delete(self, ent_id):
-        path = 'delete'
-        params = {'objectId': ent_id}
-        self._try_request('DELETE', path, params=params)
 
 
     def _apply_Create(self, change):
         new = change.new
-        zone_name = new.zone.name
-        zone_id = self.zones[zone_name]
         params_for = getattr(self, f'_params_for_{new._type}')
+        zone_id = self.zones[new.zone.name]
         for params in params_for(new):
-            self._record_create(zone_id, params)
+            self._client.record_create(zone_id, params)
 
     def _apply_Delete(self, change):
         existing = change.existing
@@ -785,9 +772,9 @@ class BlueCatProvider(BaseProvider):
                 entid = record['id']
                 props = record['properties']
                 if 'type' in props and props['type'] == _type:
-                    self._record_delete(entid)
+                    self._client.record_delete(entid)
                 else:
-                    self._record_delete(entid)
+                    self._client.record_delete(entid)
 
     def _apply_Update(self, change):
         self._apply_Delete(change)
@@ -800,16 +787,12 @@ class BlueCatProvider(BaseProvider):
             '_apply: zone=%s, len(changes)=%d', desired.name, len(changes)
         )
 
-        name = desired.name
-        if name not in self.zones:
-            self.log.debug('_apply:   no matching zone, creating')
-            data = {
-                'parentId': self.view_id,
-                'absoluteName': name[:-1], 
-                'properties': 'deployable=false',
-            }
-            resp = self._try_request('POST', 'addZone', data=data)
-            zone_id = resp['id']
+        domain_name = desired.name[:-1]
+        try:
+            self._client.domain(domain_name)
+        except BlueCatClientNotFound:
+            self.log.debug(f'_apply: no matching zone, creating one...')
+            zid = self._client.domain_create(domain_name)
             self.zones[name] = zone_id
             self._zone_records[name] = {}
 
@@ -822,8 +805,8 @@ class BlueCatProvider(BaseProvider):
             class_name = change.__class__.__name__
             getattr(self, f'_apply_{class_name}')(change)
 
-        # clear the cache
-        self._zone_records.pop(name, None)
+        # clear the cache if any
+        self._zone_records.pop(desired.name, None)
 
     def _extra_changes(self, existing, desired, changes):
         extra_changes = []
